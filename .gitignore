@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.o
+*.a
+*.out
+RNG_test_stdin
+RNG_test
+.vscode/
+.idea/
