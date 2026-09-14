@@ -3,6 +3,8 @@ pgprng -- "Pretty Good PRNG": combined/coupled generator experiments
 Author: Aly Graham, with Claude (Anthropic) -- analysis, code assistance,
 and testing.
 
+Version: 1.1 -- see CHANGELOG.md for what changed each release.
+
 This repository is a personal research project exploring
 combined/coupled pseudorandom number generator (PRNG) constructions
 built from many small additive congruential components, combined via XOR
@@ -146,16 +148,17 @@ Is the code parameterized, or hard-coded to 101/103?
 Fully parameterized -- 101 and 103 are just the choice made for this
 project's own testing, not a requirement of the code. Looking directly
 at FilteredSelectionPRNG.__init__ (and CombinedPRNG's), the ensemble
-sizes are simply len(incs_11) and len(incs_13) -- whatever length lists
-of increments you pass in. (These are additive increments -- each
-component advances as x -> x + increment mod 2^64 -- not multipliers;
-there is no multiplicative term anywhere in this recurrence. See the
-terminology note in pgprng_common.py.) The only constraints actually
-enforced in code are: each increment must be an odd integer in
-[1, 2^64-1] (oddness matters -- see below), all increments within and
-across both ensembles must be distinct, and each ensemble must have at
-least one element. There is no primality check anywhere in either class.
-A developer can use any ensemble sizes they like, prime or not.
+sizes are simply len(ensemble_1) and len(ensemble_2) -- read live, never
+cached -- for whatever length lists of increments you pass in. (These are
+additive increments -- each component advances as
+x -> x + increment mod 2^64 -- not multipliers; there is no multiplicative
+term anywhere in this recurrence. See the terminology note in
+pgprng_common.py.) The only constraints actually enforced in code are:
+each increment must be an odd integer in [1, 2^64-1] (oddness matters --
+see below), all increments within and across both ensembles must be
+distinct, and each ensemble must have at least one element. There is no
+primality check anywhere in either class. A developer can use any
+ensemble sizes they like, prime or not.
 
 Why 101/103 (twin primes) were used here anyway: for CombinedPRNG, the
 period formula 2^64 x e1 x e2 only gives the full benefit of multiplying
@@ -220,56 +223,61 @@ a claim those specific attacks apply to this exact construction.
 
 File manifest
 
-  -----------------------------------------------------------------------
+  ----------------------------------------------------------------------------
   File                                What it is
-  ----------------------------------- -----------------------------------
-  pgprng_common.py                    Shared mix64/mix64_inverse and
-                                      input-validation helpers used by
-                                      both generators (pulled out during
-                                      a refactor pass to remove
+  ----------------------------------- ----------------------------------------
+  pgprng_common.py                    Shared mix64/mix64_inverse, the State
+                                      object (an ensemble component's
+                                      increment + current state, bundled as
+                                      one object), and the
+                                      input-validation/ensemble-construction
+                                      helpers used by both generators -- also
+                                      where __version__ lives (pulled out
+                                      during a refactor pass to remove
                                       duplication -- verified
-                                      behavior-preserving against
-                                      fixed-seed output)
+                                      behavior-preserving against fixed-seed
+                                      output)
 
   pgprng_generator.py                 The recommended generator,
-                                      FilteredSelectionPRNG
-                                      (mix-then-combine,
+                                      FilteredSelectionPRNG (mix-then-combine,
                                       selection-from-mixed-values)
 
-  pgprng_legacy_clockstep.py          The simpler clock-stepping
-                                      generator, CombinedPRNG, plus basic
-                                      increment generation
+  pgprng_legacy_clockstep.py          The simpler clock-stepping generator,
+                                      CombinedPRNG, plus basic increment
+                                      generation
 
   pgprng_ensemble_construction.py     Rigorous, self-validating increment
-                                      construction
-                                      (gap/uniformity/smoke-test gated)
+                                      construction (gap/uniformity/smoke-test
+                                      gated)
 
-  pgprng_increments_101_103.csv       The actual 101+103 increment set
-                                      used in all testing here
+  pgprng_increments_101_103.csv       The actual 101+103 increment set used in
+                                      all testing here
 
-  pgprng_stream.py                    Streams raw generator output for
-                                      piping into external test tools
+  pgprng_stream.py                    Streams raw generator output for piping
+                                      into external test tools
 
   pgprng_nist_battery.py,             The hand-built NIST SP 800-22-style
   pgprng_run_tests.py                 statistical battery
 
-  pgprng_crack_attempt.py             The toy-scale cryptanalytic
-                                      brute-force attack described above
+  pgprng_crack_attempt.py             The toy-scale cryptanalytic brute-force
+                                      attack described above
 
-  RNG_test_stdin.cpp                  Modified PractRand test harness
-                                      (stdin adapter) -- see
-                                      SESSION_CHANGES_README.txt if
-                                      bundled
+  RNG_test_stdin.cpp                  Modified PractRand test harness (stdin
+                                      adapter) -- see
+                                      SESSION_CHANGES_README.txt if bundled
 
   final_report.md                     Full statistical results and honest
                                       publication-worthiness assessment
 
   LICENSE                             MIT License
 
-  pgprng_README.docx,                 Word and plain-text copies of this
-  pgprng_README.txt                   same README, for reading locally
-                                      without a Markdown renderer
-  -----------------------------------------------------------------------
+  CHANGELOG.md                        Version history -- what changed in each
+                                      release
+
+  pgprng_README.docx,                 Word and plain-text copies of this same
+  pgprng_README.txt                   README, for reading locally without a
+                                      Markdown renderer
+  ----------------------------------------------------------------------------
 
 License
 

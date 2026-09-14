@@ -4,19 +4,36 @@
 # ---------------------------------------------------------------------
 """
 Shared building blocks for the pgprng family (pgprng_generator.py,
-pgprng_legacy_clockstep.py): the mix64 finalizer and its inverse, and
-the input-validation helpers that all three generator classes
-(RotatingEnsemble, CombinedPRNG, SelectionCombinedPRNG,
+pgprng_legacy_clockstep.py): the mix64 finalizer and its inverse, the
+State object each ensemble component is built from, and the
+input-validation/ensemble-construction helpers all three generator
+classes (RotatingEnsemble, CombinedPRNG, SelectionCombinedPRNG,
 FilteredSelectionPRNG) need in essentially identical form.
 
-Pulled out during a refactor pass whose only goal was removing
-duplication -- this file introduces no new behavior. Every function
-here previously existed, near-verbatim, inline in two or three places;
-moving it here does not change what any generator computes (verified
-by comparing generator output on a fixed seed before and after this
-refactor).
+Object model: each ensemble component's fixed increment and current
+running state used to be tracked in two separate parallel lists (one
+list of increments, one list of states, kept in sync by matching
+index) under names like incs_11/states_11 -- names that also baked in
+a specific ensemble size (11, from this project's original toy scale)
+that stopped being true once it grew to 101/103 components. Increment
+and state are now bundled into a single State object per component,
+and each ensemble (ensemble_1/ensemble_2 in the generator classes
+below) is just one list of pointers to State objects -- there is no
+second list to keep in sync, and no separate size ever cached; an
+ensemble's size is always len(ensemble), read live, since ensemble
+sizes are meant to be something the code can change.
+
+Pulled out during a refactor pass; the mix64/validation logic itself
+introduces no new behavior (verified by comparing generator output on
+a fixed seed before and after). The State-object restructuring is new
+as of this pass -- verified the same way, against the prior two-list
+representation.
 """
+from dataclasses import dataclass
 import secrets
+
+__version__ = "1.1"  # single source of truth for the package version;
+                      # see CHANGELOG.md for what changed each release.
 
 MASK64 = (1 << 64) - 1
 
@@ -51,6 +68,25 @@ def mix64_inverse(value: int) -> int:
     return z
 
 
+@dataclass
+class State:
+    """One ensemble component, as a single object rather than two
+    parallel-list entries: its fixed `increment` (set once at
+    construction, never changes) and its current running `state`
+    (mutates every time this component is selected). ensemble_1/
+    ensemble_2 in the generator classes below are each just a list of
+    these -- a list of pointers to State objects, nothing more
+    structural than that, so ensemble size is simply len(ensemble)."""
+    increment: int
+    state: int
+
+    def step(self) -> int:
+        """Advance state by increment (mod 2**64) and return the new
+        state -- the one place the additive recurrence itself lives."""
+        self.state = (self.state + self.increment) & MASK64
+        return self.state
+
+
 def validate_increments(incs, name="incs"):
     """Validate a list of per-component increments (the additive step
     each component advances by each time it's selected -- NOT
@@ -70,7 +106,7 @@ def validate_increments(incs, name="incs"):
     return incs
 
 
-def validate_disjoint(incs_a, incs_b, name_a="incs_11", name_b="incs_13"):
+def validate_disjoint(incs_a, incs_b, name_a="incs_1", name_b="incs_2"):
     """Raise if the two increment lists share any value."""
     if set(incs_a) & set(incs_b):
         raise ValueError(f"{name_a} and {name_b} must be disjoint")
@@ -89,3 +125,15 @@ def prepare_seeds(seeds, incs, name="seeds"):
         if not (0 <= s <= MASK64):
             raise ValueError(f"each value in {name} must be in [0, 2**64-1], got {s!r}")
     return seeds
+
+
+def build_ensemble(incs, seeds=None, incs_name="incs", seeds_name="seeds"):
+    """Validate increments and seeds, then bundle them into a list of
+    State objects -- one ensemble, represented as a single list of
+    pointers to State objects rather than two parallel lists. This is
+    the only place an ensemble gets constructed anywhere in this
+    codebase; every generator class builds ensemble_1/ensemble_2 (or,
+    for RotatingEnsemble, its own single `ensemble`) by calling this."""
+    incs = validate_increments(incs, incs_name)
+    seeds = prepare_seeds(seeds, incs, seeds_name)
+    return [State(increment=inc, state=seed) for inc, seed in zip(incs, seeds)]

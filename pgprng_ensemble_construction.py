@@ -45,7 +45,7 @@ from scipy.stats import chi2
 import sys
 import os
 
-from pgprng_legacy_clockstep import CombinedPRNG, MASK64
+from pgprng_legacy_clockstep import CombinedPRNG
 
 M64 = 1 << 64
 

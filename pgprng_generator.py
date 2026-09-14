@@ -9,7 +9,7 @@ PRNG-selection generator, incorporating both changes just requested:
   1. mix64 is applied to EACH ensemble's raw output separately, and the
      two MIXED values are XORed to form the final output -- not (as in
      the original SelectionCombinedPRNG, kept unchanged in
-     combined_prng_101_103.py for future reference/testing) XORing the
+     pgprng_legacy_clockstep.py for future reference/testing) XORing the
      raw values first and mixing once.
 
      This matters for a reason demonstrated directly in this session:
@@ -48,58 +48,62 @@ additive increments, not multipliers -- see the note in pgprng_common.py.
 There is no multiplicative term anywhere in either ensemble's recurrence;
 the only real multiplications in this file are inside mix64 itself.)
 
-mix64/mix64_inverse and the input-validation helpers used below live
-in pgprng_common.py (shared with pgprng_legacy_clockstep.py) -- they
-were duplicated inline in both files until a refactor pass consolidated
-them; that move changes no behavior (verified by comparing generator
-output on a fixed seed before and after).
+Object model: ensemble_1 and ensemble_2 are each a list of State
+objects (pgprng_common.py) -- one per component, bundling that
+component's fixed increment with its current running state. There is
+no separate size attribute cached anywhere; ensemble size is always
+len(ensemble_1)/len(ensemble_2), read live, since ensemble sizes are
+meant to be something the code can change, not something baked into
+attribute names the way the old incs_11/incs_13 naming implied a fixed
+e=11/e=13 scale that had already stopped being true once this project
+grew to 101/103 components.
+
+mix64/mix64_inverse and the input-validation/ensemble-construction
+helpers used below live in pgprng_common.py (shared with
+pgprng_legacy_clockstep.py) -- they were duplicated inline in both
+files until a refactor pass consolidated them; that move changes no
+behavior (verified by comparing generator output on a fixed seed
+before and after).
 """
-from pgprng_common import MASK64, mix64, mix64_inverse, validate_increments, validate_disjoint, prepare_seeds
+from pgprng_common import mix64, mix64_inverse, validate_disjoint, build_ensemble
 
 
 class FilteredSelectionPRNG:
     """Mutual PRNG-selection with per-ensemble mix64 applied BEFORE
-    combination, and selection indices driven by the mixed values."""
+    combination, and selection indices driven by the mixed values.
+    ensemble_1/ensemble_2 are each a list[State] (see pgprng_common.py) --
+    a list of pointers to State objects, not two parallel lists."""
 
-    def __init__(self, incs_11, incs_13, seeds_11=None, seeds_13=None):
-        incs_11 = validate_increments(incs_11, "incs_11")
-        incs_13 = validate_increments(incs_13, "incs_13")
-        validate_disjoint(incs_11, incs_13, "incs_11", "incs_13")
-
-        self.incs_11 = incs_11
-        self.incs_13 = incs_13
-        self.e11 = len(incs_11)
-        self.e13 = len(incs_13)
-        self.states_11 = prepare_seeds(seeds_11, incs_11, "seeds_11")
-        self.states_13 = prepare_seeds(seeds_13, incs_13, "seeds_13")
+    def __init__(self, incs_1, incs_2, seeds_1=None, seeds_2=None):
+        validate_disjoint(incs_1, incs_2, "incs_1", "incs_2")
+        self.ensemble_1 = build_ensemble(incs_1, seeds_1, "incs_1", "seeds_1")
+        self.ensemble_2 = build_ensemble(incs_2, seeds_2, "incs_2", "seeds_2")
 
         # Bootstrap using mixed (not raw) seed values, for consistency
         # with "filter each value before combining it with anything."
-        self.last_mixed11 = 0
-        for s in self.states_11:
-            self.last_mixed11 ^= mix64(s)
-        self.last_mixed13 = 0
-        for s in self.states_13:
-            self.last_mixed13 ^= mix64(s)
+        self.last_mixed1 = 0
+        for s in self.ensemble_1:
+            self.last_mixed1 ^= mix64(s.state)
+        self.last_mixed2 = 0
+        for s in self.ensemble_2:
+            self.last_mixed2 ^= mix64(s.state)
 
-        self.select_counts_11 = [0] * self.e11
-        self.select_counts_13 = [0] * self.e13
+        self.select_counts_1 = [0] * len(self.ensemble_1)
+        self.select_counts_2 = [0] * len(self.ensemble_2)
 
     def next(self):
-        idx13 = self.last_mixed11 % self.e13
-        self.states_13[idx13] = (self.states_13[idx13] + self.incs_13[idx13]) & MASK64
-        new_mixed13 = mix64(self.states_13[idx13])
-        self.select_counts_13[idx13] += 1
+        idx2 = self.last_mixed1 % len(self.ensemble_2)
+        new_mixed2 = mix64(self.ensemble_2[idx2].step())
+        self.select_counts_2[idx2] += 1
 
-        idx11 = self.last_mixed13 % self.e11
-        self.states_11[idx11] = (self.states_11[idx11] + self.incs_11[idx11]) & MASK64
-        new_mixed11 = mix64(self.states_11[idx11])
-        self.select_counts_11[idx11] += 1
+        idx1 = self.last_mixed2 % len(self.ensemble_1)
+        new_mixed1 = mix64(self.ensemble_1[idx1].step())
+        self.select_counts_1[idx1] += 1
 
-        self.last_mixed11 = new_mixed11
-        self.last_mixed13 = new_mixed13
+        self.last_mixed1 = new_mixed1
+        self.last_mixed2 = new_mixed2
 
-        return new_mixed11 ^ new_mixed13
+        return new_mixed1 ^ new_mixed2
 
     def __iter__(self):
         return self
@@ -138,8 +142,8 @@ if __name__ == "__main__":
         # compare against the actual internal mixed values at this step --
         # garbage should match NEITHER of them
         print(f"  output=0x{out:016X}  mix64_inverse(output)=0x{garbage:016X}  "
-              f"(this is not last_mixed11=0x{gen.last_mixed11:016X} "
-              f"nor last_mixed13=0x{gen.last_mixed13:016X})")
+              f"(this is not last_mixed1=0x{gen.last_mixed1:016X} "
+              f"nor last_mixed2=0x{gen.last_mixed2:016X})")
 
     print("\n" + "=" * 70)
     print("Quick statistical smoke test (200,000 words)")
@@ -158,7 +162,7 @@ if __name__ == "__main__":
           f"bit0_frac={(vals & 1).mean():.5f} (ideal 0.5)  "
           f"distinct_frac={len(np.unique(vals))/n:.6f} (ideal 1.0)")
 
-    counts11 = np.array(gen2.select_counts_11)
-    counts13 = np.array(gen2.select_counts_13)
-    print(f"selection fairness: 101-side expected {n/gen2.e11:.0f} min={counts11.min()} max={counts11.max()} std={counts11.std():.1f}")
-    print(f"selection fairness: 103-side expected {n/gen2.e13:.0f} min={counts13.min()} max={counts13.max()} std={counts13.std():.1f}")
+    counts1 = np.array(gen2.select_counts_1)
+    counts2 = np.array(gen2.select_counts_2)
+    print(f"selection fairness: 101-side expected {n/len(gen2.ensemble_1):.0f} min={counts1.min()} max={counts1.max()} std={counts1.std():.1f}")
+    print(f"selection fairness: 103-side expected {n/len(gen2.ensemble_2):.0f} min={counts2.min()} max={counts2.max()} std={counts2.std():.1f}")

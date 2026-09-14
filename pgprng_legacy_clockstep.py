@@ -14,9 +14,20 @@ recurrence itself, which is purely additive (see pgprng_common.py: these
 are increments, not multipliers).
 
 No changes needed to the class internals -- both classes are already
-parameterized by e via len(incs). "Enlarging the ensembles" is just:
-draw 101+103=204 distinct random odd increments (uniformly over the full
-64-bit odd range, as settled on earlier), split them, and instantiate.
+parameterized by ensemble size via len(ensemble). "Enlarging the
+ensembles" is just: draw 101+103=204 distinct random odd increments
+(uniformly over the full 64-bit odd range, as settled on earlier),
+split them, and instantiate.
+
+Object model: each ensemble is a list of State objects (see
+pgprng_common.py) -- one per component, bundling its fixed increment
+with its current running state, rather than the two parallel lists
+(one of increments, one of states) used before this pass. Ensemble
+size is always read live via len(ensemble); nothing caches it
+separately, since ensemble sizes are meant to be mutable rather than
+baked into the code the way the old e=11/e=13-derived attribute names
+(incs_11/incs_13, ens11/ens13) implied a fixed scale that had already
+stopped being true once this project grew to 101/103 components.
 
 Estimated periods (see this session's toy-scale verification):
   - CombinedPRNG (clock-stepping):        EXACT  = 2**64 * 101 * 103
@@ -27,23 +38,23 @@ Estimated periods (see this session's toy-scale verification):
 """
 import random
 
-from pgprng_common import MASK64, mix64, validate_increments, validate_disjoint, prepare_seeds
+from pgprng_common import mix64, validate_disjoint, build_ensemble
 
 
 class RotatingEnsemble:
+    """One ensemble, stepped in a fixed round-robin ("clock-stepping")
+    order. `self.ensemble` is a list[State] (see pgprng_common.py) --
+    a list of pointers to State objects, with no separate size cached;
+    ensemble size is always len(self.ensemble)."""
+
     def __init__(self, incs, seeds=None):
-        incs = validate_increments(incs, "incs")
-        seeds = prepare_seeds(seeds, incs, "seeds")
-        self.incs = incs
-        self.e = len(incs)
-        self.states = list(seeds)
+        self.ensemble = build_ensemble(incs, seeds, "incs", "seeds")
         self.cursor = 0
 
     def next(self):
-        i = self.cursor
-        self.states[i] = (self.states[i] + self.incs[i]) & MASK64
-        out = self.states[i]
-        self.cursor = (self.cursor + 1) % self.e
+        state_obj = self.ensemble[self.cursor]
+        out = state_obj.step()
+        self.cursor = (self.cursor + 1) % len(self.ensemble)
         return out
 
 
@@ -52,15 +63,15 @@ class CombinedPRNG:
     2**64 * e1 * e2 when e1, e2 are coprime (proven, and confirmed
     exactly in every toy-scale test this session)."""
 
-    def __init__(self, incs_11, incs_13, seeds_11=None, seeds_13=None):
-        validate_disjoint(incs_11, incs_13, "incs_11", "incs_13")
-        self.ens11 = RotatingEnsemble(incs_11, seeds_11)
-        self.ens13 = RotatingEnsemble(incs_13, seeds_13)
+    def __init__(self, incs_1, incs_2, seeds_1=None, seeds_2=None):
+        validate_disjoint(incs_1, incs_2, "incs_1", "incs_2")
+        self.ens1 = RotatingEnsemble(incs_1, seeds_1)
+        self.ens2 = RotatingEnsemble(incs_2, seeds_2)
 
     def next(self):
-        out11 = self.ens11.next()
-        out13 = self.ens13.next()
-        return mix64(out11 ^ out13)
+        out1 = self.ens1.next()
+        out2 = self.ens2.next()
+        return mix64(out1 ^ out2)
 
     def __iter__(self):
         return self
@@ -72,45 +83,38 @@ class CombinedPRNG:
 class SelectionCombinedPRNG:
     """Mutual PRNG-selection design. Period not exactly calculable;
     order-of-magnitude estimate ~2**128 from the toy-scale M**2
-    pattern found this session (see module docstring)."""
+    pattern found this session (see module docstring). ensemble_1/
+    ensemble_2 are each a list[State] (see pgprng_common.py) -- a list
+    of pointers to State objects, not two parallel lists."""
 
-    def __init__(self, incs_11, incs_13, seeds_11=None, seeds_13=None):
-        incs_11 = validate_increments(incs_11, "incs_11")
-        incs_13 = validate_increments(incs_13, "incs_13")
-        validate_disjoint(incs_11, incs_13, "incs_11", "incs_13")
+    def __init__(self, incs_1, incs_2, seeds_1=None, seeds_2=None):
+        validate_disjoint(incs_1, incs_2, "incs_1", "incs_2")
+        self.ensemble_1 = build_ensemble(incs_1, seeds_1, "incs_1", "seeds_1")
+        self.ensemble_2 = build_ensemble(incs_2, seeds_2, "incs_2", "seeds_2")
 
-        self.incs_11 = incs_11
-        self.incs_13 = incs_13
-        self.e11 = len(incs_11)
-        self.e13 = len(incs_13)
-        self.states_11 = prepare_seeds(seeds_11, incs_11, "seeds_11")
-        self.states_13 = prepare_seeds(seeds_13, incs_13, "seeds_13")
+        self.last_out1 = 0
+        for s in self.ensemble_1:
+            self.last_out1 ^= s.state
+        self.last_out2 = 0
+        for s in self.ensemble_2:
+            self.last_out2 ^= s.state
 
-        self.last_out11 = 0
-        for s in self.states_11:
-            self.last_out11 ^= s
-        self.last_out13 = 0
-        for s in self.states_13:
-            self.last_out13 ^= s
-
-        self.select_counts_11 = [0] * self.e11
-        self.select_counts_13 = [0] * self.e13
+        self.select_counts_1 = [0] * len(self.ensemble_1)
+        self.select_counts_2 = [0] * len(self.ensemble_2)
 
     def next(self):
-        idx13 = self.last_out11 % self.e13
-        self.states_13[idx13] = (self.states_13[idx13] + self.incs_13[idx13]) & MASK64
-        new_out13 = self.states_13[idx13]
-        self.select_counts_13[idx13] += 1
+        idx2 = self.last_out1 % len(self.ensemble_2)
+        new_out2 = self.ensemble_2[idx2].step()
+        self.select_counts_2[idx2] += 1
 
-        idx11 = self.last_out13 % self.e11
-        self.states_11[idx11] = (self.states_11[idx11] + self.incs_11[idx11]) & MASK64
-        new_out11 = self.states_11[idx11]
-        self.select_counts_11[idx11] += 1
+        idx1 = self.last_out2 % len(self.ensemble_1)
+        new_out1 = self.ensemble_1[idx1].step()
+        self.select_counts_1[idx1] += 1
 
-        self.last_out11 = new_out11
-        self.last_out13 = new_out13
+        self.last_out1 = new_out1
+        self.last_out2 = new_out2
 
-        return mix64(new_out11 ^ new_out13)
+        return mix64(new_out1 ^ new_out2)
 
     def __iter__(self):
         return self
@@ -192,8 +196,8 @@ if __name__ == "__main__":
             "distinct_frac": distinct / n,
         }
 
-    clock_gen = CombinedPRNG(INCS_101, INCS_103, seeds_11=list(FIXED_SEEDS_101), seeds_13=list(FIXED_SEEDS_103))
-    select_gen = SelectionCombinedPRNG(INCS_101, INCS_103, seeds_11=list(FIXED_SEEDS_101), seeds_13=list(FIXED_SEEDS_103))
+    clock_gen = CombinedPRNG(INCS_101, INCS_103, seeds_1=list(FIXED_SEEDS_101), seeds_2=list(FIXED_SEEDS_103))
+    select_gen = SelectionCombinedPRNG(INCS_101, INCS_103, seeds_1=list(FIXED_SEEDS_101), seeds_2=list(FIXED_SEEDS_103))
 
     clock_stats = run_battery(clock_gen)
     select_stats = run_battery(select_gen)
@@ -205,12 +209,12 @@ if __name__ == "__main__":
     for key in clock_stats:
         print(f"{key:<18} {clock_stats[key]:>14.5f} {select_stats[key]:>14.5f} {ideals[key]:>10.4f}")
 
-    counts11 = np.array(select_gen.select_counts_11)
-    counts13 = np.array(select_gen.select_counts_13)
-    exp11 = N_SAMPLES / select_gen.e11
-    exp13 = N_SAMPLES / select_gen.e13
+    counts1 = np.array(select_gen.select_counts_1)
+    counts2 = np.array(select_gen.select_counts_2)
+    exp1 = N_SAMPLES / len(select_gen.ensemble_1)
+    exp2 = N_SAMPLES / len(select_gen.ensemble_2)
     print(f"\nselection fairness (PRNG-selection design only):")
-    print(f"  101-side: expected {exp11:.0f} picks/component, "
-          f"observed min={counts11.min()} max={counts11.max()} std={counts11.std():.1f}")
-    print(f"  103-side: expected {exp13:.0f} picks/component, "
-          f"observed min={counts13.min()} max={counts13.max()} std={counts13.std():.1f}")
+    print(f"  101-side: expected {exp1:.0f} picks/component, "
+          f"observed min={counts1.min()} max={counts1.max()} std={counts1.std():.1f}")
+    print(f"  103-side: expected {exp2:.0f} picks/component, "
+          f"observed min={counts2.min()} max={counts2.max()} std={counts2.std():.1f}")
